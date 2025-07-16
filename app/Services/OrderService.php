@@ -4,109 +4,83 @@ namespace App\Services;
 
 use App\Models\Order;
 use App\Models\OrderItem;
+use App\Models\Cart;
 use App\Models\Product;
-use App\Models\User;
+use App\Services\PDFService;
+use App\Services\EmailService;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Auth;
 
 class OrderService
 {
-    protected $emailService;
     protected $pdfService;
+    protected $emailService;
 
-    public function __construct(EmailService $emailService, PDFService $pdfService)
+    public function __construct(PDFService $pdfService, EmailService $emailService)
     {
-        $this->emailService = $emailService;
         $this->pdfService = $pdfService;
+        $this->emailService = $emailService;
     }
 
     /**
-     * Créer une nouvelle commande (Zone Admin)
+     * Créer une commande à partir du panier
      */
-    public function createOrder(array $data)
+    public function createOrder(array $orderData, $cartItems)
     {
         try {
             DB::beginTransaction();
 
+            // Calculer le total
+            $total = $cartItems->sum(function($item) {
+                return $item->quantity * $item->product->price;
+            });
+
+            // Créer la commande
             $order = Order::create([
-                'user_id' => $data['user_id'],
-                'status' => $data['status'] ?? 'pending',
-                'total_amount' => 0,
-                'shipping_address' => $data['shipping_address'] ?? null,
-                'notes' => $data['notes'] ?? null
+                'user_id' => Auth::id(),
+                'order_number' => $this->generateOrderNumber(),
+                'status' => 'pending',
+                'payment_status' => 'pending',
+                'total' => $total,
+                'shipping_address' => $orderData['shipping_address'],
+                'billing_address' => $orderData['billing_address'] ?? $orderData['shipping_address'],
+                'phone' => $orderData['phone'],
+                'notes' => $orderData['notes'] ?? null,
+                'payment_method' => $orderData['payment_method'],
             ]);
 
-            $totalAmount = 0;
-
-            foreach ($data['items'] as $item) {
-                $product = Product::findOrFail($item['product_id']);
-                
-                // Vérifier le stock
-                if ($product->stock < $item['quantity']) {
-                    throw new \Exception("Stock insuffisant pour le produit: {$product->name}");
-                }
-
-                $orderItem = OrderItem::create([
+            // Créer les items de commande
+            foreach ($cartItems as $cartItem) {
+                OrderItem::create([
                     'order_id' => $order->id,
-                    'product_id' => $product->id,
-                    'quantity' => $item['quantity'],
-                    'price' => $product->price
+                    'product_id' => $cartItem->product_id,
+                    'quantity' => $cartItem->quantity,
+                    'price' => $cartItem->product->price,
+                    'total' => $cartItem->quantity * $cartItem->product->price,
                 ]);
 
-                $totalAmount += $product->price * $item['quantity'];
-
-                // Mettre à jour le stock
-                $product->decrement('stock', $item['quantity']);
+                // Décrémenter le stock
+                $cartItem->product->decrement('stock', $cartItem->quantity);
             }
-
-            $order->update(['total_amount' => $totalAmount]);
 
             DB::commit();
 
-            // Envoyer l'email de confirmation
+            // Envoyer email de confirmation
             $this->emailService->sendOrderConfirmation($order);
 
-            Log::info('Commande créée avec succès', ['order_id' => $order->id]);
+            Log::info('Commande créée avec succès', [
+                'order_id' => $order->id,
+                'user_id' => Auth::id(),
+                'total' => $total
+            ]);
 
             return $order;
 
         } catch (\Exception $e) {
             DB::rollBack();
-            Log::error('Erreur création commande', ['error' => $e->getMessage()]);
-            throw $e;
-        }
-    }
-
-    /**
-     * Mettre à jour le statut d'une commande (Zone Admin)
-     */
-    public function updateOrderStatus(Order $order, string $newStatus)
-    {
-        try {
-            $oldStatus = $order->status;
-            
-            $order->update(['status' => $newStatus]);
-
-            // Envoyer l'email de mise à jour
-            $this->emailService->sendOrderStatusUpdate($order, $oldStatus, $newStatus);
-
-            // Si la commande est terminée, générer et envoyer la facture
-            if ($newStatus === 'completed') {
-                $pdfPath = $this->pdfService->generateInvoicePDF($order);
-                $this->emailService->sendInvoiceEmail($order, $pdfPath);
-            }
-
-            Log::info('Statut commande mis à jour', [
-                'order_id' => $order->id,
-                'old_status' => $oldStatus,
-                'new_status' => $newStatus
-            ]);
-
-            return true;
-
-        } catch (\Exception $e) {
-            Log::error('Erreur mise à jour statut commande', [
-                'order_id' => $order->id,
+            Log::error('Erreur création commande', [
+                'user_id' => Auth::id(),
                 'error' => $e->getMessage()
             ]);
             throw $e;
@@ -114,89 +88,140 @@ class OrderService
     }
 
     /**
-     * Annuler une commande (Zone Admin)
+     * Créer une commande via API
+     */
+    public function createOrderFromApi(array $orderData)
+    {
+        try {
+            DB::beginTransaction();
+
+            $total = 0;
+            $orderItems = [];
+
+            // Valider et calculer le total
+            foreach ($orderData['items'] as $item) {
+                $product = Product::findOrFail($item['product_id']);
+                
+                if (!$product->is_active || $product->stock < $item['quantity']) {
+                    throw new \Exception("Produit {$product->name} non disponible");
+                }
+
+                $itemTotal = $product->price * $item['quantity'];
+                $total += $itemTotal;
+
+                $orderItems[] = [
+                    'product' => $product,
+                    'quantity' => $item['quantity'],
+                    'price' => $product->price,
+                    'total' => $itemTotal
+                ];
+            }
+
+            // Créer la commande
+            $order = Order::create([
+                'user_id' => Auth::id(),
+                'order_number' => $this->generateOrderNumber(),
+                'status' => 'pending',
+                'payment_status' => 'pending',
+                'total' => $total,
+                'shipping_address' => $orderData['shipping_address'],
+                'billing_address' => $orderData['billing_address'] ?? $orderData['shipping_address'],
+                'phone' => $orderData['phone'] ?? Auth::user()->phone,
+                'payment_method' => $orderData['payment_method'],
+            ]);
+
+            // Créer les items et décrémenter le stock
+            foreach ($orderItems as $item) {
+                OrderItem::create([
+                    'order_id' => $order->id,
+                    'product_id' => $item['product']->id,
+                    'quantity' => $item['quantity'],
+                    'price' => $item['price'],
+                    'total' => $item['total'],
+                ]);
+
+                $item['product']->decrement('stock', $item['quantity']);
+            }
+
+            DB::commit();
+
+            return $order;
+
+        } catch (\Exception $e) {
+            DB::rollBack();
+            throw $e;
+        }
+    }
+
+    /**
+     * Mettre à jour le statut d'une commande
+     */
+    public function updateOrderStatus(Order $order, string $status)
+    {
+        $oldStatus = $order->status;
+        $order->update(['status' => $status]);
+
+        // Envoyer notification email
+        $this->emailService->sendOrderStatusUpdate($order, $status);
+
+        Log::info('Statut commande mis à jour', [
+            'order_id' => $order->id,
+            'old_status' => $oldStatus,
+            'new_status' => $status
+        ]);
+
+        return $order;
+    }
+
+    /**
+     * Générer une facture PDF
+     */
+    public function generateInvoicePDF(Order $order)
+    {
+        return $this->pdfService->generateInvoice($order);
+    }
+
+    /**
+     * Annuler une commande
      */
     public function cancelOrder(Order $order, string $reason = null)
     {
         try {
-            if ($order->status === 'cancelled') {
-                throw new \Exception('La commande est déjà annulée');
-            }
-
             DB::beginTransaction();
 
-            // Restaurer le stock
+            // Remettre en stock les produits
             foreach ($order->orderItems as $item) {
                 $item->product->increment('stock', $item->quantity);
             }
 
+            // Mettre à jour le statut
             $order->update([
                 'status' => 'cancelled',
-                'notes' => $reason ? "Annulée: {$reason}" : 'Commande annulée'
+                'cancelled_at' => now(),
+                'cancellation_reason' => $reason
             ]);
 
             DB::commit();
-
-            // Envoyer l'email de notification
-            $this->emailService->sendOrderStatusUpdate($order, $order->status, 'cancelled');
 
             Log::info('Commande annulée', [
                 'order_id' => $order->id,
                 'reason' => $reason
             ]);
 
-            return true;
+            return $order;
 
         } catch (\Exception $e) {
             DB::rollBack();
-            Log::error('Erreur annulation commande', [
-                'order_id' => $order->id,
-                'error' => $e->getMessage()
-            ]);
             throw $e;
         }
     }
 
     /**
-     * Obtenir les statistiques des commandes (Zone Admin)
+     * Obtenir les statistiques des commandes
      */
     public function getOrderStatistics(array $filters = [])
     {
-        try {
-            $query = Order::query();
-
-            // Appliquer les filtres
-            if (isset($filters['date_from'])) {
-                $query->whereDate('created_at', '>=', $filters['date_from']);
-            }
-
-            if (isset($filters['date_to'])) {
-                $query->whereDate('created_at', '<=', $filters['date_to']);
-            }
-
-            $orders = $query->get();
-
-            return [
-                'total_orders' => $orders->count(),
-                'total_revenue' => $orders->sum('total_amount'),
-                'average_order_value' => $orders->avg('total_amount'),
-                'orders_by_status' => $orders->groupBy('status')->map->count(),
-                'recent_orders' => $orders->sortByDesc('created_at')->take(10),
-                'top_customers' => $this->getTopCustomers($filters)
-            ];
-
-        } catch (\Exception $e) {
-            Log::error('Erreur statistiques commandes', ['error' => $e->getMessage()]);
-            throw $e;
-        }
-    }
-
-    /**
-     * Obtenir les meilleurs clients (Zone Admin)
-     */
-    protected function getTopCustomers(array $filters = [])
-    {
-        $query = Order::with('user');
+        $query = Order::query();
 
         if (isset($filters['date_from'])) {
             $query->whereDate('created_at', '>=', $filters['date_from']);
@@ -206,44 +231,28 @@ class OrderService
             $query->whereDate('created_at', '<=', $filters['date_to']);
         }
 
-        return $query->select('user_id', DB::raw('COUNT(*) as orders_count'), DB::raw('SUM(total_amount) as total_spent'))
-                    ->groupBy('user_id')
-                    ->orderBy('total_spent', 'desc')
-                    ->limit(10)
-                    ->get();
+        $orders = $query->get();
+
+        return [
+            'total_orders' => $orders->count(),
+            'total_revenue' => $orders->where('status', 'completed')->sum('total'),
+            'pending_orders' => $orders->where('status', 'pending')->count(),
+            'completed_orders' => $orders->where('status', 'completed')->count(),
+            'cancelled_orders' => $orders->where('status', 'cancelled')->count(),
+            'average_order_value' => $orders->avg('total'),
+            'orders_by_status' => $orders->groupBy('status')->map->count(),
+        ];
     }
 
     /**
-     * Supprimer une commande (Zone Admin)
+     * Générer un numéro de commande unique
      */
-    public function deleteOrder(Order $order)
+    protected function generateOrderNumber()
     {
-        try {
-            if ($order->status !== 'cancelled') {
-                throw new \Exception('Seules les commandes annulées peuvent être supprimées');
-            }
+        do {
+            $orderNumber = 'ORD-' . date('Y') . '-' . str_pad(mt_rand(1, 999999), 6, '0', STR_PAD_LEFT);
+        } while (Order::where('order_number', $orderNumber)->exists());
 
-            DB::beginTransaction();
-
-            // Supprimer les items de commande
-            $order->orderItems()->delete();
-            
-            // Supprimer la commande
-            $order->delete();
-
-            DB::commit();
-
-            Log::info('Commande supprimée', ['order_id' => $order->id]);
-
-            return true;
-
-        } catch (\Exception $e) {
-            DB::rollBack();
-            Log::error('Erreur suppression commande', [
-                'order_id' => $order->id,
-                'error' => $e->getMessage()
-            ]);
-            throw $e;
-        }
+        return $orderNumber;
     }
 }

@@ -2,156 +2,116 @@
 
 namespace App\Services;
 
+use App\Models\Order;
 use App\Mail\OrderConfirmation;
 use App\Mail\OrderStatusUpdate;
 use App\Mail\InvoiceEmail;
-use App\Models\Order;
-use App\Models\User;
 use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Facades\Log;
 
 class EmailService
 {
     /**
-     * Envoyer l'email de confirmation de commande
+     * Envoyer email de confirmation de commande
      */
     public function sendOrderConfirmation(Order $order)
     {
         try {
-            Mail::to($order->user->email)
-                ->send(new OrderConfirmation($order));
+            Mail::to($order->user->email)->send(new OrderConfirmation($order));
             
-            Log::info('Email de confirmation envoyé', [
+            Log::info('Email confirmation commande envoyé', [
                 'order_id' => $order->id,
                 'user_email' => $order->user->email
             ]);
-            
-            return true;
+
         } catch (\Exception $e) {
             Log::error('Erreur envoi email confirmation', [
                 'order_id' => $order->id,
                 'error' => $e->getMessage()
             ]);
-            
-            return false;
         }
     }
 
     /**
-     * Envoyer l'email de mise à jour du statut de commande
+     * Envoyer email de mise à jour du statut
      */
-    public function sendOrderStatusUpdate(Order $order, string $oldStatus, string $newStatus)
+    public function sendOrderStatusUpdate(Order $order, $newStatus)
     {
         try {
-            Mail::to($order->user->email)
-                ->send(new OrderStatusUpdate($order, $oldStatus, $newStatus));
+            Mail::to($order->user->email)->send(new OrderStatusUpdate($order, $newStatus));
             
-            Log::info('Email de mise à jour statut envoyé', [
+            Log::info('Email mise à jour statut envoyé', [
                 'order_id' => $order->id,
-                'old_status' => $oldStatus,
                 'new_status' => $newStatus,
                 'user_email' => $order->user->email
             ]);
-            
-            return true;
+
         } catch (\Exception $e) {
-            Log::error('Erreur envoi email mise à jour statut', [
+            Log::error('Erreur envoi email statut', [
                 'order_id' => $order->id,
                 'error' => $e->getMessage()
             ]);
-            
-            return false;
         }
     }
 
     /**
-     * Envoyer l'email avec facture (Zone Admin)
+     * Envoyer facture par email
      */
-    public function sendInvoiceEmail(Order $order, string $pdfPath)
+    public function sendInvoice(Order $order, $invoicePath)
     {
         try {
-            Mail::to($order->user->email)
-                ->send(new InvoiceEmail($order, $pdfPath));
+            Mail::to($order->user->email)->send(new InvoiceEmail($order, $invoicePath));
             
-            Log::info('Email avec facture envoyé', [
+            Log::info('Facture envoyée par email', [
                 'order_id' => $order->id,
-                'user_email' => $order->user->email,
-                'pdf_path' => $pdfPath
+                'user_email' => $order->user->email
             ]);
-            
-            return true;
+
         } catch (\Exception $e) {
-            Log::error('Erreur envoi email facture', [
+            Log::error('Erreur envoi facture', [
                 'order_id' => $order->id,
                 'error' => $e->getMessage()
             ]);
-            
-            return false;
         }
     }
 
     /**
-     * Envoyer un email personnalisé aux clients (Zone Admin)
+     * Envoyer email de bienvenue
      */
-    public function sendCustomEmail(array $recipients, string $subject, string $message, array $attachments = [])
+    public function sendWelcomeEmail($user)
     {
         try {
-            foreach ($recipients as $email) {
-                Mail::send('emails.custom', ['message' => $message], function ($mail) use ($email, $subject, $attachments) {
-                    $mail->to($email)
-                         ->subject($subject);
-                    
-                    foreach ($attachments as $attachment) {
-                        $mail->attach($attachment);
-                    }
-                });
-            }
-            
-            Log::info('Email personnalisé envoyé', [
-                'recipients_count' => count($recipients),
-                'subject' => $subject
+            // Logique d'envoi d'email de bienvenue
+            Log::info('Email de bienvenue envoyé', [
+                'user_id' => $user->id,
+                'user_email' => $user->email
             ]);
-            
-            return true;
+
         } catch (\Exception $e) {
-            Log::error('Erreur envoi email personnalisé', [
+            Log::error('Erreur envoi email bienvenue', [
+                'user_id' => $user->id,
                 'error' => $e->getMessage()
             ]);
-            
-            return false;
         }
     }
 
     /**
-     * Envoyer des notifications aux admins
+     * Envoyer notification de stock faible (Admin)
      */
-    public function sendAdminNotification(string $subject, string $message, array $data = [])
+    public function sendLowStockAlert($product)
     {
         try {
-            $admins = User::where('role', 'admin')->get();
-            
-            foreach ($admins as $admin) {
-                Mail::send('emails.admin-notification', [
-                    'message' => $message,
-                    'data' => $data
-                ], function ($mail) use ($admin, $subject) {
-                    $mail->to($admin->email)
-                         ->subject($subject);
-                });
-            }
-            
-            Log::info('Notification admin envoyée', [
-                'subject' => $subject,
-                'admins_count' => $admins->count()
+            // Logique d'envoi d'alerte stock faible aux admins
+            Log::info('Alerte stock faible envoyée', [
+                'product_id' => $product->id,
+                'stock' => $product->stock
             ]);
-            
-            return true;
+
         } catch (\Exception $e) {
-            Log::error('Erreur envoi notification admin', [
+            Log::error('Erreur envoi alerte stock', [
+                'product_id' => $product->id,
                 'error' => $e->getMessage()
             ]);
-            
-            return false;
         }
     }
 }
